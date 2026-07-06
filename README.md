@@ -83,6 +83,57 @@ sudo systemctl restart postgresql
   datos (Zerto) sobre esta VM, que el backend expondrá a través de su
   API para que la consola de observabilidad la consuma.
 
+## Servicios de monitorización (db-probe y sys-probe)
+
+Además del esquema, este proyecto incluye dos microservicios ligeros
+que se despliegan **en la misma VM que PostgreSQL** y que consulta la
+Observability Console:
+
+| Servicio    | Puerto | Endpoints                | Qué expone                                             |
+|-------------|--------|---------------------------|---------------------------------------------------------|
+| `db-probe`  | 5000   | `/ping`, `/metrics`        | SELECT 1 real, conexiones, tamaño BD, cache hit, transacciones |
+| `sys-probe` | 5001   | `/ping`, `/metrics`        | CPU, RAM, disco, uptime de la VM                        |
+
+### Despliegue de los probes
+
+```bash
+# Crear usuario de solo lectura para el probe (rol pg_monitor, sin superusuario)
+sudo -u postgres psql -d flight_booking -c "
+  CREATE ROLE probe_user WITH LOGIN PASSWORD 'CAMBIA_ESTA_PASSWORD';
+  GRANT pg_monitor TO probe_user;
+  GRANT CONNECT ON DATABASE flight_booking TO probe_user;
+"
+
+# Usuario de sistema para ambos servicios
+sudo useradd -r -s /bin/false probe || true
+
+# --- db-probe ---
+sudo mkdir -p /opt/db-probe
+sudo cp -r db-probe/* /opt/db-probe/
+cd /opt/db-probe
+sudo python3 -m venv venv
+sudo ./venv/bin/pip install -r requirements.txt
+sudo nano /opt/db-probe/db-probe.service   # ajustar PROBE_DATABASE_DSN
+sudo cp db-probe.service /etc/systemd/system/
+
+# --- sys-probe ---
+sudo mkdir -p /opt/sys-probe
+sudo cp -r ../sys-probe/* /opt/sys-probe/
+cd /opt/sys-probe
+sudo python3 -m venv venv
+sudo ./venv/bin/pip install -r requirements.txt
+sudo cp sys-probe.service /etc/systemd/system/
+
+# Arrancar ambos
+sudo chown -R probe:probe /opt/db-probe /opt/sys-probe
+sudo systemctl daemon-reload
+sudo systemctl enable --now db-probe sys-probe
+```
+
+Recuerda abrir los puertos 5000 y 5001 en el firewall de esta VM, pero
+**solo hacia la VM de la Observability Console** (no expongas estos
+puertos a internet).
+
 ## Próximos pasos
 
 1. `flight-booking-backend`: API REST sobre este esquema (FastAPI + SQLAlchemy/asyncpg)
