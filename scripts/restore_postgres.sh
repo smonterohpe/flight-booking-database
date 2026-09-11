@@ -1,117 +1,143 @@
 #!/bin/bash
 # =============================================================================
-# restore_postgres.sh — Restaura PostgreSQL desde el backup local
+# restore_postgres.sh — Restaura PostgreSQL desde el backup local (Plan B)
 #
-# USO (como root en la VM de base de datos):
-#   ./restore_postgres.sh
-#
-# QUÉ HACE:
-#   1. Para PostgreSQL (si estuviera corriendo)
-#   2. Elimina los ficheros cifrados/renombrados por encrypt_postgres.sh
-#   3. Restaura el directorio de datos desde el backup local
-#   4. Restaura los permisos correctos de PostgreSQL
-#   5. Arranca PostgreSQL y verifica que responde
-#   6. Arranca el backend y verifica que responde
-#   7. Elimina el backup local (limpieza)
-#
-# NOTA: Este script es el PLAN B de la demo.
-#   El camino principal de recuperación es el failover con Zerto.
-#   Usa este script solo si quieres mostrar la recuperación desde
-#   el backup local (sin Zerto) o para resetear el entorno de demo.
+# USO: ./restore_postgres.sh
+# NOTA: El camino principal de recuperación es Zerto. Usa este script
+#       para resetear el entorno tras la demo.
 # =============================================================================
 
 set -euo pipefail
 
-# ── Configuración ─────────────────────────────────────────────────────────────
 PGDATA="/var/lib/postgresql/16/main"
 BACKUP_DIR="$(dirname "$0")/backup"
 SERVICE_PG="postgresql"
-SERVICE_BACKEND="flight-booking-backend"
-BACKEND_HOST="10.10.44.14"   # IP de la VM de backend — ajusta si es diferente
 PG_USER="postgres"
 
-# ── Colores ───────────────────────────────────────────────────────────────────
-RED='\033[0;31m'; GRN='\033[0;32m'; YEL='\033[1;33m'; BLD='\033[1m'; RST='\033[0m'
+GRN='\033[0;32m'; RED='\033[0;31m'; YEL='\033[1;33m'
+CYA='\033[0;36m'; BLD='\033[1m'; RST='\033[0m'
 
-# ── Comprobaciones previas ────────────────────────────────────────────────────
+typewriter() {
+  local text="$1"; local delay="${2:-0.03}"
+  for (( i=0; i<${#text}; i++ )); do
+    printf '%s' "${text:$i:1}"; sleep "$delay"
+  done; echo
+}
+
 if [ "$(id -u)" -ne 0 ]; then
-  echo -e "${RED}ERROR: Este script debe ejecutarse como root.${RST}"
-  exit 1
+  echo -e "${RED}ERROR: Ejecuta como root.${RST}"; exit 1
+fi
+if [ ! -d "$BACKUP_DIR/main" ]; then
+  echo -e "${RED}ERROR: No se encuentra backup en $BACKUP_DIR/main${RST}"; exit 1
 fi
 
-if [ ! -d "$BACKUP_DIR/main" ]; then
-  echo -e "${RED}ERROR: No se encuentra el backup en $BACKUP_DIR/main${RST}"
-  echo -e "Ejecuta encrypt_postgres.sh primero, o verifica la ruta del backup."
-  exit 1
-fi
+clear
+sleep 0.3
+echo -e "${GRN}${BLD}"
+cat << 'HERO_ART'
+
+    ███████╗███████╗██████╗ ████████╗ ██████╗ 
+    ╚══███╔╝██╔════╝██╔══██╗╚══██╔══╝██╔═══██╗
+      ███╔╝ █████╗  ██████╔╝   ██║   ██║   ██║
+     ███╔╝  ██╔══╝  ██╔══██╗   ██║   ██║   ██║
+    ███████╗███████╗██║  ██║   ██║   ╚██████╔╝
+    ╚══════╝╚══════╝╚═╝  ╚═╝   ╚═╝    ╚═════╝ 
+
+               R E C O V E R Y   M O D E
+
+HERO_ART
+echo -e "${RST}"
+sleep 0.4
+typewriter "  Wario thought he won... but Zerto was watching." 0.04
+sleep 0.3
+typewriter "  Initiating local backup restore — plan B activated." 0.04
+sleep 0.6
+echo ""
 
 BACKUP_SIZE=$(du -sh "$BACKUP_DIR/main" | awk '{print $1}')
 
-# ─────────────────────────────────────────────────────────────────────────────
-echo -e "\n${BLD}${GRN}✦  RESTAURACIÓN DE FLIGHT BOOKING DATABASE${RST}"
-echo -e "${YEL}Restaurando desde backup local: $BACKUP_DIR/main ($BACKUP_SIZE)${RST}\n"
-
-# ── [1/6] Para PostgreSQL ─────────────────────────────────────────────────────
-echo -e "${BLD}[1/6]${RST} Asegurando que PostgreSQL está parado..."
+# ── [1/5] Para PostgreSQL ─────────────────────────────────────────────────────
+echo -e "${BLD}[1/5]${RST} Stopping PostgreSQL..."
 systemctl stop "$SERVICE_PG" 2>/dev/null || true
 sleep 2
-echo -e "      ${GRN}✔ PostgreSQL parado${RST}"
+echo -e "      ${GRN}✔ Stopped${RST}"
 
-# ── [2/6] Elimina los datos cifrados ─────────────────────────────────────────
-echo -e "${BLD}[2/6]${RST} Eliminando datos cifrados..."
-PGDATA_SIZE_BEFORE=$(du -sh "$PGDATA" 2>/dev/null | awk '{print $1}' || echo "?")
+# ── [2/5] Elimina los datos cifrados ─────────────────────────────────────────
+echo -e "\n${BLD}[2/5]${RST} Removing Wario's encrypted files..."
+SIZE_BEFORE=$(du -sh "$PGDATA" 2>/dev/null | awk '{print $1}' || echo "?")
 rm -rf "$PGDATA"
-echo -e "      ${GRN}✔ Directorio cifrado eliminado ($PGDATA_SIZE_BEFORE)${RST}"
+echo -e "      ${GRN}✔ Encrypted data removed ($SIZE_BEFORE deleted)${RST}"
 
-# ── [3/6] Restaura desde backup ──────────────────────────────────────────────
-echo -e "${BLD}[3/6]${RST} Restaurando desde backup (~$BACKUP_SIZE)..."
-cp -a "$BACKUP_DIR/main" "$PGDATA"
-echo -e "      ${GRN}✔ Datos restaurados en $PGDATA${RST}"
+# ── [3/5] Restaura desde backup ──────────────────────────────────────────────
+echo -e "\n${BLD}[3/5]${RST} Restoring clean data from backup (~$BACKUP_SIZE)..."
+(cp -a "$BACKUP_DIR/main" "$PGDATA") &
+CP_PID=$!
+while kill -0 "$CP_PID" 2>/dev/null; do
+  for c in '⣾' '⣷' '⣯' '⣟' '⡿' '⢿' '⣻' '⣽'; do
+    printf "\r      %s Copying..." "$c"; sleep 0.1
+  done
+done
+wait "$CP_PID"
+echo -e "\r      ${GRN}✔ Data restored to $PGDATA${RST}                    "
 
-# ── [4/6] Restaura permisos ───────────────────────────────────────────────────
-echo -e "${BLD}[4/6]${RST} Restaurando permisos de PostgreSQL..."
+# ── [4/5] Restaura permisos ───────────────────────────────────────────────────
+echo -e "\n${BLD}[4/5]${RST} Restoring PostgreSQL permissions..."
 chown -R "$PG_USER:$PG_USER" "$PGDATA"
 chmod 700 "$PGDATA"
-echo -e "      ${GRN}✔ Permisos restaurados (propietario: $PG_USER)${RST}"
+echo -e "      ${GRN}✔ Permissions restored (owner: $PG_USER)${RST}"
 
-# ── [5/6] Arranca PostgreSQL y verifica ──────────────────────────────────────
-echo -e "${BLD}[5/6]${RST} Arrancando PostgreSQL..."
+# ── [5/5] Arranca PostgreSQL y verifica ──────────────────────────────────────
+echo -e "\n${BLD}[5/5]${RST} Starting PostgreSQL..."
 systemctl start "$SERVICE_PG"
 sleep 4
-
-# Verifica que PostgreSQL responde con SELECT 1
 if su -c "psql -d flight_booking -c 'SELECT 1;' -q -t" "$PG_USER" > /dev/null 2>&1; then
-  echo -e "      ${GRN}✔ PostgreSQL responde correctamente (SELECT 1 OK)${RST}"
+  echo -e "      ${GRN}✔ PostgreSQL responding (SELECT 1 OK)${RST}"
 else
-  echo -e "      ${RED}✗ PostgreSQL arrancó pero no responde. Revisa los logs:${RST}"
+  echo -e "      ${RED}✗ PostgreSQL started but not responding — check logs:${RST}"
   echo -e "        journalctl -u postgresql -n 30 --no-pager"
   exit 1
 fi
 
-# ── [6/6] Arranca el backend ──────────────────────────────────────────────────
-echo -e "${BLD}[6/6]${RST} Arrancando el backend..."
-ssh -o StrictHostKeyChecking=no root@"$BACKEND_HOST" \
-  "systemctl start $SERVICE_BACKEND && sleep 3 && systemctl is-active $SERVICE_BACKEND" \
-  2>/dev/null && echo -e "      ${GRN}✔ Backend arrancado${RST}" \
-  || echo -e "      ${YEL}⚠ No se pudo arrancar el backend remotamente — arráncalo manualmente${RST}"
-
 # ── Limpieza del backup ───────────────────────────────────────────────────────
 echo ""
-read -rp "¿Eliminar el backup local? (recomendado tras verificar la recuperación) [s/N]: " CONFIRM
+read -rp "  Delete local backup? (recommended after verifying recovery) [s/N]: " CONFIRM
 if [[ "$CONFIRM" =~ ^[sS]$ ]]; then
   rm -rf "$BACKUP_DIR"
-  echo -e "      ${GRN}✔ Backup eliminado${RST}"
+  echo -e "      ${GRN}✔ Backup deleted${RST}"
 else
-  echo -e "      ${YEL}Backup conservado en $BACKUP_DIR${RST}"
+  echo -e "      ${YEL}Backup kept at $BACKUP_DIR${RST}"
 fi
 
-# ── Resumen final ─────────────────────────────────────────────────────────────
+# ── Pantalla final ────────────────────────────────────────────────────────────
+clear
+sleep 0.3
+echo -e "${GRN}${BLD}"
+cat << 'VICTORY_ART'
+
+    ██████╗ ███████╗ ██████╗ ██████╗ ██╗   ██╗███████╗██████╗ ██╗
+    ██╔══██╗██╔════╝██╔════╝██╔═══██╗██║   ██║██╔════╝██╔══██╗██║
+    ██████╔╝█████╗  ██║     ██║   ██║██║   ██║█████╗  ██████╔╝██║
+    ██╔══██╗██╔══╝  ██║     ██║   ██║╚██╗ ██╔╝██╔══╝  ██╔══██╗╚═╝
+    ██║  ██║███████╗╚██████╗╚██████╔╝ ╚████╔╝ ███████╗██║  ██║██╗
+    ╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚═════╝   ╚═══╝  ╚══════╝╚═╝  ╚═╝╚═╝
+
+VICTORY_ART
+echo -e "${RST}"
+sleep 0.4
+typewriter "  Wario has been defeated. The data is SAFE." 0.04
+sleep 0.3
+typewriter "  The flight booking system is back online." 0.04
+sleep 0.3
+typewriter "  No coins were paid to Wario. WAH!" 0.04
+sleep 0.5
 echo ""
-echo -e "${GRN}${BLD}════════════════════════════════════════════════════════${RST}"
-echo -e "${GRN}${BLD}  RESTAURACIÓN COMPLETADA${RST}"
-echo -e "${GRN}${BLD}════════════════════════════════════════════════════════${RST}"
-echo -e "  Base de datos  : ${GRN}OPERATIVA${RST}"
-echo -e "  Backend        : ${GRN}ARRANCADO${RST}"
-echo -e "  Pérdida de datos: ${GRN}NINGUNA${RST} (restaurado desde backup pre-ataque)"
-echo -e "${GRN}${BLD}════════════════════════════════════════════════════════${RST}"
+echo -e "${GRN}${BLD}═══════════════════════════════════════════════════${RST}"
+echo -e "  Database   : ${GRN}RESTORED & OPERATIONAL${RST}"
+echo -e "  Data loss  : ${GRN}ZERO (pre-attack backup)${RST}"
+echo -e "  Wario paid : ${GRN}NOTHING${RST}"
+echo -e "${GRN}${BLD}═══════════════════════════════════════════════════${RST}"
+echo ""
+echo -e "${YEL}  NOTE: Start the backend manually on its VM:${RST}"
+echo -e "  ssh root@BACKEND_IP 'systemctl start flight-booking-backend'"
+echo -e "${GRN}${BLD}═══════════════════════════════════════════════════${RST}"
 echo ""

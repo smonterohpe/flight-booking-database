@@ -1,35 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# encrypt_postgres.sh — Simula un ataque de ransomware sobre PostgreSQL
-#
-# USO (como root en la VM de base de datos):
-#   ./encrypt_postgres.sh
-#
-# QUÉ HACE:
-#   1. Para el servicio del backend (para que la Observability Console
-#      muestre el impacto inmediatamente)
-#   2. Hace una copia de seguridad del directorio de datos de PostgreSQL
-#   3. Para PostgreSQL
-#   4. Cifra los ficheros WAL y renombra los ficheros de datos (simula
-#      el cifrado del ransomware sin destruir los datos realmente)
-#   5. Genera 5 ficheros de padding de 512 MB para simular el disco
-#      llenándose (efecto visual en la Observability Console)
-#   6. Deja un fichero README_RANSOM.txt como los ransomware reales
-#
-# ADAPTADO DEL SCRIPT ORIGINAL:
-#   - Usuario cambiado de 'adminhpe' a 'root'
-#   - Padding reducido a 5×512 MB (2.5 GB) para respetar el espacio libre
-#   - Añadida parada del backend antes de atacar la BD (mejor narrativa)
-#   - Ruta PGDATA ajustada a PostgreSQL 16 (/var/lib/postgresql/16/main)
-#
-# PREREQUISITOS:
-#   - openssl instalado (apt install openssl)
-#   - Al menos 5 GB libres en la partición de datos
-#   - Ejecutar como root
-#
-# RECUPERACIÓN:
-#   Con Zerto  → failover al site DR desde la Observability Console
-#   Con backup → ejecutar restore_postgres.sh en esta misma máquina
+# encrypt_postgres.sh — Simulación de ataque de ransomware por WARIO
 # =============================================================================
 
 set -euo pipefail
@@ -38,142 +9,250 @@ set -euo pipefail
 PGDATA="/var/lib/postgresql/16/main"
 BACKUP_DIR="$(dirname "$0")/backup"
 SERVICE_PG="postgresql"
-SERVICE_BACKEND="flight-booking-backend"
-BACKEND_HOST="10.10.44.14"   # IP de la VM de backend — ajusta si es diferente
-
 PADDING_COUNT=5
 PADDING_SIZE_MB=512
-ENCRYPT_KEY="ransom-demo-key-2026"   # clave de demo, no es una clave real
+ENCRYPT_KEY="wario-ransom-demo-2026"
 
 # ── Colores ───────────────────────────────────────────────────────────────────
-RED='\033[0;31m'; YEL='\033[1;33m'; GRN='\033[0;32m'; BLD='\033[1m'; RST='\033[0m'
+YEL='\033[1;33m'; RED='\033[0;31m'; GRN='\033[0;32m'
+CYA='\033[0;36m'; MAG='\033[0;35m'; BLD='\033[1m'; RST='\033[0m'
+BLK_BG='\033[40m'; YEL_BG='\033[43m'
 
-# ── Comprobaciones previas ────────────────────────────────────────────────────
+# ── Efecto de escritura animada ───────────────────────────────────────────────
+typewriter() {
+  local text="$1"
+  local delay="${2:-0.035}"
+  for (( i=0; i<${#text}; i++ )); do
+    printf '%s' "${text:$i:1}"
+    sleep "$delay"
+  done
+  echo
+}
+
+blink_warning() {
+  for _ in 1 2 3; do
+    printf "${RED}${BLD}██ ALERT ██${RST}"
+    sleep 0.3
+    printf "\r           \r"
+    sleep 0.2
+  done
+}
+
+# ── Comprobaciones previas (silenciosas, antes de la animación) ───────────────
 if [ "$(id -u)" -ne 0 ]; then
-  echo -e "${RED}ERROR: Este script debe ejecutarse como root.${RST}"
-  exit 1
+  echo -e "${RED}ERROR: Ejecuta como root.${RST}"; exit 1
 fi
-
 if [ ! -d "$PGDATA" ]; then
-  echo -e "${RED}ERROR: No se encuentra PGDATA en $PGDATA${RST}"
-  exit 1
+  echo -e "${RED}ERROR: No se encuentra PGDATA en $PGDATA${RST}"; exit 1
 fi
-
 if [ -d "$BACKUP_DIR" ]; then
-  echo -e "${RED}ERROR: Ya existe un backup en $BACKUP_DIR"
-  echo -e "Ejecuta restore_postgres.sh antes de volver a simular el ataque.${RST}"
-  exit 1
+  echo -e "${RED}ERROR: Ya existe backup en $BACKUP_DIR. Ejecuta restore_postgres.sh primero.${RST}"; exit 1
 fi
-
-# Comprueba espacio disponible (necesita al menos tamaño PGDATA + 2.5 GB para padding)
 PGDATA_SIZE_MB=$(du -sm "$PGDATA" | awk '{print $1}')
 FREE_MB=$(df -m "$PGDATA" | awk 'NR==2{print $4}')
 NEEDED_MB=$((PGDATA_SIZE_MB + PADDING_COUNT * PADDING_SIZE_MB + 1024))
 if [ "$FREE_MB" -lt "$NEEDED_MB" ]; then
-  echo -e "${RED}ERROR: Espacio insuficiente."
-  echo -e "  Necesario: ~${NEEDED_MB} MB  |  Disponible: ${FREE_MB} MB${RST}"
-  exit 1
+  echo -e "${RED}ERROR: Espacio insuficiente. Necesario: ~${NEEDED_MB}MB | Libre: ${FREE_MB}MB${RST}"; exit 1
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-echo -e "\n${BLD}${RED}⚠  SIMULACIÓN DE RANSOMWARE — FLIGHT BOOKING DATABASE${RST}"
-echo -e "${YEL}Este script simula un ataque para fines de demostración."
-echo -e "Los datos quedan en el backup — usa restore_postgres.sh para recuperarlos.${RST}\n"
-sleep 2
+#   W A R I O   A P P E A R S
+# ─────────────────────────────────────────────────────────────────────────────
+clear
+sleep 0.5
 
-# ── [1/6] Para el backend ─────────────────────────────────────────────────────
-echo -e "${BLD}[1/6]${RST} Parando el backend (flight-booking-backend)..."
-ssh -o StrictHostKeyChecking=no root@"$BACKEND_HOST" \
-  "systemctl stop $SERVICE_BACKEND" 2>/dev/null \
-  && echo -e "      ${GRN}✔ Backend parado${RST}" \
-  || echo -e "      ${YEL}⚠ No se pudo parar el backend (continúa de todas formas)${RST}"
+echo -e "${YEL}${BLD}"
+cat << 'WARIO_ART'
 
-# ── [2/6] Backup del directorio de datos ──────────────────────────────────────
-echo -e "${BLD}[2/6]${RST} Haciendo backup de PGDATA (~${PGDATA_SIZE_MB} MB)..."
+        ██╗    ██╗ █████╗ ██████╗ ██╗ ██████╗ 
+        ██║    ██║██╔══██╗██╔══██╗██║██╔═══██╗
+        ██║ █╗ ██║███████║██████╔╝██║██║   ██║
+        ██║███╗██║██╔══██║██╔══██╗██║██║   ██║
+        ╚███╔███╔╝██║  ██║██║  ██║██║╚██████╔╝
+         ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝ ╚═════╝ 
+
+WARIO_ART
+echo -e "${RST}"
+
+sleep 0.4
+echo -e "${YEL}${BLD}          R A N S O M W A R E   v2.0${RST}"
+echo -e "${YEL}             by Wario Industries™${RST}"
+echo ""
+sleep 0.8
+
+typewriter "  WAH HA HA! Is-a me, WARIO!" 0.06
+sleep 0.3
+typewriter "  You think your little airline database is safe?" 0.04
+sleep 0.2
+typewriter "  WRONG! Wario is the best at EVERYTHING." 0.04
+sleep 0.3
+typewriter "  Even ransomware. ESPECIALLY ransomware." 0.04
+sleep 0.5
+echo ""
+typewriter "  Now Wario takes your precious data..." 0.04
+sleep 0.2
+typewriter "  ...and you pay Wario MANY coins to get it back. WAH!" 0.04
+sleep 0.8
+
+echo ""
+blink_warning
+echo ""
+sleep 0.3
+
+# ── [1/5] Backup del directorio de datos ──────────────────────────────────────
+echo -e "\n${YEL}${BLD}[1/5]${RST} ${BLD}Making backup before encryption...${RST}"
+echo -ne "      "
 mkdir -p "$BACKUP_DIR"
-cp -a "$PGDATA" "$BACKUP_DIR/main"
-chown -R root:root "$BACKUP_DIR"
-echo -e "      ${GRN}✔ Backup guardado en $BACKUP_DIR/main${RST}"
+(cp -a "$PGDATA" "$BACKUP_DIR/main" && chown -R root:root "$BACKUP_DIR") &
+CP_PID=$!
+while kill -0 "$CP_PID" 2>/dev/null; do
+  for c in '⣾' '⣷' '⣯' '⣟' '⡿' '⢿' '⣻' '⣽'; do
+    printf "\r      %s Copying PGDATA (~%s MB)..." "$c" "$PGDATA_SIZE_MB"
+    sleep 0.1
+  done
+done
+wait "$CP_PID"
+echo -e "\r      ${GRN}✔ Backup saved → $BACKUP_DIR/main${RST}           "
 
-# ── [3/6] Para PostgreSQL ─────────────────────────────────────────────────────
-echo -e "${BLD}[3/6]${RST} Parando PostgreSQL..."
+# ── [2/5] Para PostgreSQL ─────────────────────────────────────────────────────
+echo -e "\n${YEL}${BLD}[2/5]${RST} ${BLD}Stopping PostgreSQL...${RST}"
+echo -ne "      "
 systemctl stop "$SERVICE_PG"
-echo -e "      ${GRN}✔ PostgreSQL parado${RST}"
+echo -e "${GRN}✔ PostgreSQL stopped — database going dark!${RST}"
+sleep 0.5
 
-# ── [4/6] Cifra WAL y renombra ficheros de datos ─────────────────────────────
-echo -e "${BLD}[4/6]${RST} Cifrando WAL y datos..."
-
-# Cifra los ficheros WAL (Write-Ahead Log) con AES-256
+# ── [3/5] Cifra WAL ───────────────────────────────────────────────────────────
+echo -e "\n${YEL}${BLD}[3/5]${RST} ${BLD}WARIO encrypts your WAL files!${RST}"
 WAL_DIR="$PGDATA/pg_wal"
+WAL_COUNT=0
 if [ -d "$WAL_DIR" ]; then
-  WAL_COUNT=0
   while IFS= read -r -d '' wal_file; do
     openssl enc -aes-256-cbc -salt -pbkdf2 -iter 100000 \
-      -in "$wal_file" -out "${wal_file}.enc" \
+      -in "$wal_file" -out "${wal_file}.wario" \
       -k "$ENCRYPT_KEY" 2>/dev/null
     rm -f "$wal_file"
     WAL_COUNT=$((WAL_COUNT + 1))
+    printf "\r      ${RED}🔒 Encrypting WAL: %d files...${RST}" "$WAL_COUNT"
   done < <(find "$WAL_DIR" -maxdepth 1 -type f -print0)
-  echo -e "      ${GRN}✔ $WAL_COUNT ficheros WAL cifrados${RST}"
 fi
+echo -e "\n      ${GRN}✔ $WAL_COUNT WAL files encrypted (WAH!)${RST}"
 
-# Renombra los ficheros de base de datos (simula cifrado sin destruir datos)
+# ── [4/5] Renombra ficheros de datos ─────────────────────────────────────────
+echo -e "\n${YEL}${BLD}[4/5]${RST} ${BLD}WARIO scrambles your data files!${RST}"
 BASE_DIR="$PGDATA/base"
+RENAMED=0
 if [ -d "$BASE_DIR" ]; then
-  RENAMED=0
   while IFS= read -r -d '' db_file; do
-    mv "$db_file" "${db_file}.encrypted"
+    mv "$db_file" "${db_file}.wario"
     RENAMED=$((RENAMED + 1))
-  done < <(find "$BASE_DIR" -maxdepth 2 -type f -not -name "*.encrypted" -print0)
-  echo -e "      ${GRN}✔ $RENAMED ficheros de datos renombrados${RST}"
+    if (( RENAMED % 50 == 0 )); then
+      printf "\r      ${RED}🔒 Files encrypted: %d...${RST}" "$RENAMED"
+    fi
+  done < <(find "$BASE_DIR" -maxdepth 2 -type f \
+    -not -name "*.wario" -print0)
 fi
+echo -e "\n      ${GRN}✔ $RENAMED data files encrypted${RST}"
 
-# ── [5/6] Padding para llenar el disco (efecto visual) ───────────────────────
-echo -e "${BLD}[5/6]${RST} Generando $PADDING_COUNT ficheros de padding (${PADDING_SIZE_MB} MB c/u)..."
+# ── [5/5] Padding ────────────────────────────────────────────────────────────
+echo -e "\n${YEL}${BLD}[5/5]${RST} ${BLD}WARIO fills your disk with garbage! WAH!${RST}"
 PADDING_DIR="$PGDATA/pg_tblspc"
 mkdir -p "$PADDING_DIR"
 for i in $(seq 1 $PADDING_COUNT); do
-  printf "\r      Generando fichero %d/%d..." "$i" "$PADDING_COUNT"
+  printf "\r      ${RED}💣 Generating chaos file %d/%d (%d MB)...${RST}" \
+    "$i" "$PADDING_COUNT" "$PADDING_SIZE_MB"
   dd if=/dev/urandom \
-     of="$PADDING_DIR/ransom_padding_${i}.enc" \
+     of="$PADDING_DIR/wario_chaos_${i}.enc" \
      bs=1M count="$PADDING_SIZE_MB" \
      status=none 2>/dev/null
 done
-echo -e "\n      ${GRN}✔ Padding generado ($((PADDING_COUNT * PADDING_SIZE_MB)) MB)${RST}"
+echo -e "\n      ${GRN}✔ $((PADDING_COUNT * PADDING_SIZE_MB)) MB of chaos deployed${RST}"
 
-# ── [6/6] Nota de rescate ─────────────────────────────────────────────────────
-echo -e "${BLD}[6/6]${RST} Dejando nota de rescate..."
-cat > "$PGDATA/README_RANSOM.txt" << 'RANSOM'
-YOUR FILES HAVE BEEN ENCRYPTED
+# ── Nota de rescate al estilo Wario ──────────────────────────────────────────
+cat > "$PGDATA/README_WARIO.txt" << 'RANSOM_NOTE'
 
-All your database files have been encrypted with military-grade AES-256 encryption.
-To recover your data, you must pay 50 BTC to the following address:
+ ██╗    ██╗ █████╗ ██████╗ ██╗ ██████╗     ██╗    ██╗ █████╗ ███████╗
+ ██║    ██║██╔══██╗██╔══██╗██║██╔═══██╗    ██║    ██║██╔══██╗██╔════╝
+ ██║ █╗ ██║███████║██████╔╝██║██║   ██║    ██║ █╗ ██║███████║███████╗
+ ██║███╗██║██╔══██║██╔══██╗██║██║   ██║    ██║███╗██║██╔══██║╚════██║
+ ╚███╔███╔╝██║  ██║██║  ██║██║╚██████╔╝    ╚███╔███╔╝██║  ██║███████║
+  ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝ ╚═════╝     ╚══╝╚══╝ ╚═╝  ╚═╝╚══════╝
+                               H E R E
 
-  bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh
+══════════════════════════════════════════════════════════════════
 
-After payment, send proof to: ransom@darkweb.onion
+  WAH HA HA! Is-a me, WARIO!
 
-WARNING: Do not attempt to restore from backup — we have deleted your backups.
-WARNING: Do not contact law enforcement — we are watching.
+  Your pathetic little flight booking database belongs to WARIO now.
+  All your reservations, all your revenue, all your precious data —
+  ENCRYPTED. By the greatest villain in the world. Me. WARIO.
 
-You have 72 hours. After that, the key will be destroyed.
+  HOW TO GET YOUR DATA BACK:
+  ──────────────────────────
+  Send 50,000 Gold Coins (or 2 BTC, Wario accepts both) to:
 
---- THIS IS A SECURITY DEMONSTRATION ---
---- Run restore_postgres.sh to recover ---
-RANSOM
-echo -e "      ${GRN}✔ README_RANSOM.txt creado${RST}"
+      👛 bc1q_WARIO_WANTS_YOUR_COINS_wah_ha_ha_q0xkz
 
-# ── Resumen final ─────────────────────────────────────────────────────────────
+  Then email proof to: wario@waluigi-industries.evil
+
+  WARNING FROM WARIO:
+  ───────────────────
+  ✗ Do not try to restore from backup — Wario already checked.
+  ✗ Do not call the police — they cannot catch Wario.
+  ✗ Do not try to be clever — you are not as smart as Wario.
+    (Nobody is as smart as Wario.)
+
+  You have 72 hours. After that, Wario deletes the key.
+  And buys more garlic with the proceeds. WAH!
+
+  ── Wario, CEO of Wario Industries™ ──
+    "It'sa not stealing if you're Wario."
+
+══════════════════════════════════════════════════════════════════
+
+    --- THIS IS A SECURITY DEMONSTRATION ---
+    --- Run restore_postgres.sh to recover (Zerto is faster) ---
+
+RANSOM_NOTE
+
+# ── Pantalla final de Wario ───────────────────────────────────────────────────
+clear
+sleep 0.3
+echo -e "${YEL}${BLD}"
+cat << 'WARIO_WIN'
+
+    ██╗    ██╗ █████╗ ██████╗ ██╗ ██████╗ 
+    ██║    ██║██╔══██╗██╔══██╗██║██╔═══██╗
+    ██║ █╗ ██║███████║██████╔╝██║██║   ██║
+    ██║███╗██║██╔══██║██╔══██╗██║██║   ██║
+    ╚███╔███╔╝██║  ██║██║  ██║██║╚██████╔╝
+     ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝ ╚═════╝ 
+
+              W I N S   A G A I N
+
+WARIO_WIN
+echo -e "${RST}"
+sleep 0.5
+typewriter "  WAH HA HA! Wario has encrypted EVERYTHING!" 0.05
+sleep 0.2
+typewriter "  Your database? GONE. Your revenue? MINE." 0.05
+sleep 0.2
+typewriter "  Your precious flight bookings? WARIO'S NOW!" 0.05
+sleep 0.5
 echo ""
-echo -e "${RED}${BLD}════════════════════════════════════════════════════════${RST}"
-echo -e "${RED}${BLD}  ATAQUE SIMULADO COMPLETADO${RST}"
-echo -e "${RED}${BLD}════════════════════════════════════════════════════════${RST}"
-echo -e "  Base de datos  : ${RED}CIFRADA / INACCESIBLE${RST}"
-echo -e "  Backend        : ${RED}PARADO${RST}"
-echo -e "  Backup local   : ${GRN}$BACKUP_DIR/main${RST}"
-echo -e ""
-echo -e "  ${BLD}RECUPERACIÓN:${RST}"
-echo -e "  → Con Zerto  : failover desde la Observability Console"
-echo -e "  → Con backup : ./restore_postgres.sh"
-echo -e "${RED}${BLD}════════════════════════════════════════════════════════${RST}"
+typewriter "  Check README_WARIO.txt for payment instructions." 0.04
+sleep 0.2
+typewriter "  Or... use Zerto and recover in seconds. WAH!" 0.04
+sleep 0.3
+echo ""
+echo -e "${RED}${BLD}═══════════════════════════════════════════════════${RST}"
+echo -e "  Database  : ${RED}ENCRYPTED (.wario)${RST}"
+echo -e "  WAL files : ${RED}ENCRYPTED (.wario)${RST}"
+echo -e "  Disk      : ${RED}FILLING UP (${PADDING_COUNT}×${PADDING_SIZE_MB}MB chaos)${RST}"
+echo -e "  Backup    : ${GRN}SAFE → $BACKUP_DIR/main${RST}"
+echo -e "${RED}${BLD}═══════════════════════════════════════════════════${RST}"
+echo ""
+echo -e "${CYA}  RECOVERY OPTIONS:${RST}"
+echo -e "  → ${BLD}Zerto failover${RST}  : Use the Observability Console (fastest)"
+echo -e "  → ${BLD}Local backup${RST}    : ./restore_postgres.sh (plan B)"
+echo -e "${RED}${BLD}═══════════════════════════════════════════════════${RST}"
 echo ""
